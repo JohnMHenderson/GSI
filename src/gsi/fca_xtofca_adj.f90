@@ -9,7 +9,7 @@ module fca_xtofca_adj_mod
   use xtofca_wrf_adj_m, only: xtofca_wrf_adj
 
   use fca_gsi_inter_m, only: ges_to_fca_wrf, sval_to_disp_grid_adj, fca_state_to_sval_adj, &
-       uv_zlevel_par, fca_interp_order, th_compute_par, p_qv
+       uv_zlevel_par, fca_interp_order, th_compute_par, p_qv, nmoist
 
   use gsi_bundlemod, only : gsi_bundle
 
@@ -47,9 +47,9 @@ subroutine xtofca_adj(sval, flag_linear)
 
     !  copy the bg from GSI to our FCA type
     !  for DM_PARALLEL, any needed halo exchanges are done inside ges_to_fca_wrf
-    call fca_allocate_wrf_grid(bg_state,1,status)
+    call fca_allocate_wrf_grid(bg_state,nmoist,status)
     if (status .ne. 0) write(*,*) '*** xtofca: failed to allocate bg_state ***, status=',status
-    call ges_to_fca_wrf(bg_state,1,status)
+    call ges_to_fca_wrf(bg_state,status)
     if (status .ne. 0) write(*,*) '*** xtofca: ges_to_fca_wrf failed ***, status=',status
 
     !initialize all of the displaced fields
@@ -71,7 +71,7 @@ subroutine xtofca_adj(sval, flag_linear)
 !        write(*,*) '*** xtofca_adj debug: allocate disp_ad status=', status
 
        ! Zero local adjoint:
-       call fca_allocate_wrf_grid(inc_state,1,status)
+       call fca_allocate_wrf_grid(inc_state,nmoist,status)
        if (status .ne. 0) write(*,*) '*** xtofca_adj: failed to allocate inc_state ***, status=',status
 !        write(*,*) '*** xtofca_adj debug: allocate inc_stat status=', status
        call fca_zero_wrf_grid(inc_state)

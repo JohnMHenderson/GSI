@@ -9,7 +9,7 @@ module fca_xtofca_mod
   use xtofca_wrf_m, only: xtofca_wrf
 
   use fca_gsi_inter_m, only: ges_to_fca_wrf, idebug, sval_to_disp_grid, fca_state_to_sval, &
-       uv_zlevel_par, fca_interp_order, th_compute_par, p_qv
+       uv_zlevel_par, fca_interp_order, th_compute_par, p_qv, nmoist
 
   use file_utility, only : get_lun
   use gsi_bundlemod, only: gsi_bundle
@@ -52,9 +52,9 @@ subroutine xtofca(sval, flag_linear)
 
     !  copy the bg from GSI to our FCA type
     !  for DM_PARALLEL, any needed halo exchanges are done inside ges_to_fca_wrf
-    call fca_allocate_wrf_grid(bg_state,1,status)
+    call fca_allocate_wrf_grid(bg_state,nmoist,status)
     if (status .ne. 0) write(*,*) '*** xtofca: failed to allocate bg_state ***, status=',status
-    call ges_to_fca_wrf(bg_state,1,status)
+    call ges_to_fca_wrf(bg_state,status)
     if (status .ne. 0) write(*,*) '*** xtofca: ges_to_fca_wrf failed ***, status=',status
 !     write(*,*) '*** xtofca debug: flag_linear, ges_to_fca_wrf status=',flag_linear, status
 

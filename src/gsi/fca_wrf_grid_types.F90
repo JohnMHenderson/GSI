@@ -11,9 +11,10 @@ module fca_wrf_grid_types_m
 type :: fca_wrf_grid
      ! component fields
      ! Note: in current implementation, all except XLAT, XLONG are used
+     real(fp) :: ptop
      real(fp), allocatable, dimension(:,:,:) :: P, PB, PH, PHB, T, U, V, W, PH_NL
      real(fp), allocatable, dimension(:,:) ::  MU, MUB, HGT, PSFC, XLAT, XLONG
-     real(fp), allocatable, dimension(:) :: ZNU
+     real(fp), allocatable, dimension(:) :: ZNU, ZNW, C1H, C2H, C3H, C4H, C3F, C4F
      real(fp), allocatable, dimension(:,:,:,:) :: MOIST
 end type fca_wrf_grid
 

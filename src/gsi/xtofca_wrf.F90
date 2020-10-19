@@ -80,7 +80,8 @@ subroutine xtofca_wrf(bg_state,disp,disp_tl,inc_state,flag_linear,p_qv,fca_inter
             p_qv, bg_state%moist, size(bg_state%moist,4), bg_state%p, bg_state%pb, bg_state%t, &
             bg_state%ph, bg_state%phb, bg_state%u, bg_state%v, bg_state%w, &
             bg_state%hgt, bg_state%mub, bg_state%mu, bg_state%psfc, &
-            bg_state%znu, disp,&
+            bg_state%znu, bg_state%znw, bg_state%c1h, bg_state%c2h, &
+            bg_state%c3h, bg_state%c4h, bg_state%c3f, bg_state%c4f, bg_state%ptop, disp,&
             needed_ij_in, needed_ij_out, index_in, needed_wgts_out, num_glob_needed, fca_interp_order)
 
        ! initialize inc_state: differences between displaced and saved wrf_state
@@ -121,7 +122,8 @@ subroutine xtofca_wrf(bg_state,disp,disp_tl,inc_state,flag_linear,p_qv,fca_inter
 	    wrf_state_saved%t, inc_state%t, wrf_state_saved%ph, inc_state%ph, wrf_state_saved%phb, &
 	    wrf_state_saved%u, inc_state%u, wrf_state_saved%v, inc_state%v, wrf_state_saved%w, inc_state%w, &
             wrf_state_saved%hgt, wrf_state_saved%mub, wrf_state_saved%mu, inc_state%mu, wrf_state_saved%psfc, &
-            inc_state%psfc, wrf_state_saved%znu, disp, disp_tl, fca_interp_order)
+            inc_state%psfc, wrf_state_saved%znu, wrf_state_saved%znw, wrf_state_saved%c1h, wrf_state_saved%c2h, &
+            wrf_state_saved%c3h, wrf_state_saved%c4h, wrf_state_saved%c3f, wrf_state_saved%c4f, wrf_state_saved%ptop, disp, disp_tl, fca_interp_order)
 
     end if
 

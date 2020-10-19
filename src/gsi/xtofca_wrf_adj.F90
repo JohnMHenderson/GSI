@@ -7,7 +7,6 @@ module xtofca_wrf_adj_m
   use core_disp_func_ad_m, only: compute_xy_orig_ad
   use fca_wrf_grid_types_m, only: fca_wrf_grid
   use fca_wrf_grid_func_m, only: fca_copy_wrf_grid, fca_deallocate_wrf_grid
-  use displace_wrf_m, only: displace_wrf_fields
   use displace_wrf_ad_m, only: displace_wrf_fields_ad
   implicit none
   private
@@ -81,7 +80,8 @@ subroutine xtofca_wrf_adj(bg_state,disp,disp_ad,inc_state,flag_linear,p_qv,fca_i
 	    wrf_state_saved%t, inc_state%t, wrf_state_saved%ph, inc_state%ph, wrf_state_saved%phb, &
 	    wrf_state_saved%u, inc_state%u, wrf_state_saved%v, inc_state%v, wrf_state_saved%w, inc_state%w, &
             wrf_state_saved%hgt, wrf_state_saved%mub, wrf_state_saved%mu, inc_state%mu, wrf_state_saved%psfc, &
-            inc_state%psfc, wrf_state_saved%znu, disp, disp_ad,&
+            inc_state%psfc, wrf_state_saved%znu, wrf_state_saved%znw, wrf_state_saved%c1h, wrf_state_saved%c2h, &
+            wrf_state_saved%c3h, wrf_state_saved%c4h, wrf_state_saved%c3f, wrf_state_saved%c4f, wrf_state_saved%ptop, disp, disp_ad,&
             needed_ij_in, needed_ij_out, index_in, needed_wgts_out, num_glob_needed, fca_interp_order)
        
        call compute_xy_orig_ad(disp%x_disp, disp%y_disp, disp%ix_orig, disp%iy_orig, disp%dx_n, disp%dy_n,&

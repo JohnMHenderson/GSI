@@ -11,17 +11,23 @@ module fca_gsi_inter_m
   use fca_wrf_grid_types_m, only: fca_wrf_grid
   use displace_wrf_m, only: base_pres, t0, kappa, calc_ph_hyd_wrf, Rd, Rv, grav, cp
 
-  use constants, only: zero, one, two, r1000, r100
-  use gridmod, only: aeta1_ll, eta1_ll, idpsfc5, idthrm5, pt_ll, &
-       nlat,nlon,nsig,lat1,lon1,lon2,lat2,istart,jstart,ilat1,jlon1,regional
+  use constants, only: zero, one, two, r1000, r100, max_varname_length
+  use control_vectors, only: cvars3d
+  use gridmod, only: aeta1_ll, eta1_ll, aeta2_ll, eta2_ll, idpsfc5, idthrm5, pt_ll, &
+       nlat,nlon,nsig,lat1,lon1,lon2,lat2,istart,jstart,ilat1,jlon1,regional, &
+       wrf_mass_regional,fv3_regional
   use file_utility, only : get_lun
   use gsi_bundlemod, only : GSI_BundleGetPointer, gsi_bundle
+  use gsi_chemguess_mod, only: gsi_chemguess_get,gsi_chemguess_bundle
   use gsi_4dvar, only: nsubwin
-  use gsi_metguess_mod, only: gsi_metguess_bundle
+  use gsi_metguess_mod, only: gsi_metguess_get,gsi_metguess_bundle
   use kinds, only: r_kind,i_kind
+  use mpeu_util, only: getindex
   use mpimod, only: mype, npe
   use general_sub2grid_mod, only: general_sub2grid,general_grid2sub,sub2grid_info,general_sub2grid_create_info
   use general_commvars_mod, only: s2g_raf
+  use wrf_vars_mod, only : dbz_exist
+  use obsmod,only: if_model_dbz
 
   implicit none
 
@@ -44,7 +50,10 @@ module fca_gsi_inter_m
 ! TBD: not needed for now: integer :: p_qc=2, p_qr=3, p_qi=4, p_qs=5, p_qg=6
 
   integer, public :: haloi, haloj ! computed in initi_fca_from_gsi from gridmod variables
-
+  integer, public :: nmoist ! computed in initi_fca_from_gsi
+  character (len=max_varname_length), allocatable :: moistnames(:) ! allocated/populated in initi_fca_from_gsi
+  integer, allocatable :: moistguess(:) ! 1 -metguess; 2 - chemguess
+  
 ! constants used in this module
   real(fp) :: r622 = 0.622_fp, t300=300._fp
 
@@ -55,17 +64,26 @@ contains
 subroutine initi_fca_from_gsi
   ! Initialize FCA variables from GSI
   implicit none
-  integer :: inner_vars, num_fields
+  integer :: inner_vars, num_fields, icloudin, icloudout, ioff, istatus, n_actual_clouds, ngases
+  character (len=max_varname_length), allocatable :: cloudnames(:), gasnames(:)
 
+  if (.not. wrf_mass_regional .and. .not. fv3_regional) then
+     if (mype .eq. 0) write (*,*) 'initi_fca_from_gsi: fca_switch=.TRUE. is only supported for ',&
+          'wrf_mass_regional=.TRUE. or fv3_regional=.TRUE.'
+     stop 'initi_fca_from_gsi: unsupported configuration for fca_switch=.TRUE.'
+  end if
+  
   ! domain dimensions (whole grid, no buffer)
   ! NOTE: we follow the storage convention of GSI here: (lat,lon,sig) 
   !       rather than WRF (west_east,south_north,vert) to avoid
   !       having to transpose arrays. 
+  ! But note that we pad ide/jde by one gridpoint to account for staggered array usage in WRFDA and compute_xy_orig:
+  ! (Note that since ide/jde is padded by one for staggered grids, we need to use ide-1 in the comparison below)
   ids=1
   jds=1
   kds=1
-  jde=nlon
-  ide=nlat
+  jde=nlon+1
+  ide=nlat+1
   kde=nsig
 
   ! tile/patch dimensions (no buffer)
@@ -96,21 +114,112 @@ subroutine initi_fca_from_gsi
 
   !debug prints:
   if (idebug .ge. 1) &
-     write (*,'(a,/,20I5)') 'mype nsig nlon lon1 lon2 nlat lat1 lat2 its  ite  ims  ime  jts  jte  jms  jme  kms  kme  kts  kte:',&
+     write (*,'(a,/,a,/,20I5)') 'initi_fca_from_gsi: ',&
+     'mype nsig nlon lon1 lon2 nlat lat1 lat2 its  ite  ims  ime  jts  jte  jms  jme  kms  kme  kts  kte:',&
      mype, nsig, nlon, lon1, lon2, nlat, lat1, lat2, its, ite, ims, ime, jts, jte, jms, jme, kms, kme, kts, kte
 
   inner_vars = 1
   num_fields = 1 + nsig
   call general_sub2grid_create_info(s2g_press,inner_vars,nlat,nlon,nsig,num_fields,regional,s_ref=s2g_raf)
 
+  nmoist = 1 !for p_qv, which is hardwired to 1
+  ! Inquire about cloud guess fields (follows similar code in control2state)
+  ! (simplified/more general version of what's in wrwrfmassa_netcdf_wrf in cplr_wrwrfmassa.f90)
+  call gsi_metguess_get('clouds::3d',n_actual_clouds,istatus)
+  if (mype .eq. 0) write (*,*) 'initi_fca_from_gsi: n_actual_clouds=',n_actual_clouds
+  if (n_actual_clouds .gt. 0 .and. istatus .eq. 0) then
+     if (dbz_exist .and. if_model_dbz) n_actual_clouds=n_actual_clouds+1
+     allocate(cloudnames(n_actual_clouds))
+     call gsi_metguess_get('clouds::3d',cloudnames,istatus)
+     if (istatus .ne. 0) then
+        if (mype .eq. 0) write (*,*) 'initi_fca_from_gsi: Failure to get cloudnames with istatus=',istatus
+        n_actual_clouds=0
+     else
+        if (dbz_exist .and. if_model_dbz) then
+           ! check for presence 'dbz' in guess, add to cloudnames if needed
+           call gsi_metguess_get ( 'var::dbz', icloudin, istatus )
+           if (icloudin .gt. 0 .and. getindex(cloudnames,'dbz') .le. 0) then
+              cloudnames(n_actual_clouds)='dbz'
+           else
+              ! adjust since either dbz is already in cloudnames, or missing from guess
+              n_actual_clouds=n_actual_clouds-1
+           end if
+        end if !dbz_exist
+     end if !endelse istatus (cloudnames)
+  end if !n_actual_clouds > 0
+  if (n_actual_clouds .gt. 0) then
+     ! Look for cloudnames in control vector (this assumes cloudnames map one-to-one control to state vector)
+     if (mype .eq. 0) write (*,'(a,i4,a,/,(20a10))') &
+          'initi_fca_from_gsi: Found ',n_actual_clouds,' cloudnames:',cloudnames(1:n_actual_clouds)
+     icloudout=0 !
+     do icloudin=1,n_actual_clouds
+        istatus=getindex(cvars3d,cloudnames(icloudin))
+        if (istatus .gt. 0) then
+           icloudout=icloudout+1
+           if (icloudout .lt. icloudin) cloudnames(icloudout)=cloudnames(icloudin)
+        endif
+     end do
+     if (icloudout .lt. n_actual_clouds) then
+        n_actual_clouds=icloudout
+        if (mype .eq. 0) write (*,'(a,i4,a,/,(20a10))') &
+             'initi_fca_from_gsi: Only found ',n_actual_clouds,' cloudnames in control_vector (cvars3d):',&
+             cloudnames(1:n_actual_clouds)
+     end if
+     nmoist = nmoist + n_actual_clouds
+  end if
+  
+  ! handling of chemical tracers
+  call gsi_chemguess_get('dim',ngases,istatus)
+  if (mype .eq. 0) write (*,*) 'initi_fca_from_gsi: ngases=',ngases
+  if (ngases .gt. 0 .and. istatus .eq. 0) then
+     allocate(gasnames(ngases))
+     call gsi_chemguess_get('gsinames',gasnames,istatus)
+     if (istatus .ne. 0) then
+        if (mype .eq. 0) write (*,*) 'initi_fca_from_gsi: Failure to get gasnames with istatus=',istatus
+        ngases=0
+     endif
+  end if
+  if (ngases .gt. 0) then
+     ! Look for gasnames in control vector (this assumes gasnames map one-to-one control to state vector)
+     if (mype .eq. 0) write (*,'(a,i4,a,/,(20a10))') &
+          'initi_fca_from_gsi: Found ',ngases,' gasnames:',gasnames(1:ngases)
+     icloudout=0 !
+     do icloudin=1,ngases
+        istatus=getindex(cvars3d,gasnames(icloudin))
+        if (istatus .gt. 0) then
+           icloudout=icloudout+1
+           if (icloudout .lt. icloudin) gasnames(icloudout)=gasnames(icloudin)
+        endif
+     end do
+     if (icloudout .lt. ngases) then
+        ngases=icloudout
+        if (mype .eq. 0) write (*,'(a,i4,a,/,(20a10))') &
+             'initi_fca_from_gsi: Only found ',ngases,' gasnames in control_vector (cvars3d):',&
+             gasnames(1:ngases)
+     end if
+     nmoist = nmoist + ngases
+  end if
+  
+  ! store cloudnames and gasnames in moistnames:
+  allocate(moistnames(nmoist),moistguess(nmoist))
+  moistnames(1)='q'
+  ioff=1
+  if (n_actual_clouds .gt. 0) &
+       moistnames(ioff+1:ioff+n_actual_clouds)=cloudnames(1:n_actual_clouds)
+  ioff=ioff+n_actual_clouds
+  moistguess(1:ioff)=1 !metguess
+  if (ngases .gt. 0) then
+     moistnames(ioff+1:ioff+ngases)=gasnames(1:ngases)
+     moistguess(ioff+1:ioff+ngases)=2 !chemguess
+  endif
+     
 end subroutine initi_fca_from_gsi
 
-subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
+subroutine ges_to_fca_wrf(bg_state, ierror)
 
   ! xfer GSI guess fields to bg_state (an instance of fca_wrf_grid)
   implicit none
   type(fca_wrf_grid), intent(inout):: bg_state
-  integer, intent(in) :: nmoist
   integer, intent(out) :: ierror
 
   real(r_kind),dimension(:,:  ),pointer::ges_ps=>NULL()
@@ -120,10 +229,13 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
   real(r_kind),dimension(:,:,:),pointer::ges_q=>NULL()
   real(r_kind),dimension(:,:,:),pointer::ges_prse=>NULL()
   real(r_kind),dimension(:,:,:),pointer::ges_tv=>NULL()
-  integer(i_kind) :: i,j,k, istatus
+  real(r_kind),dimension(:,:,:),pointer::ges_rank3=>NULL()
+  integer(i_kind) :: i,j,k, imoist, istatus
 
-  real(fp), parameter :: WRFB_A=50., WRFB_T0=300., WRFB_P0=1.E5, cv=cp-Rd
-
+  real(fp), parameter :: WRFB_A=50., WRFB_T0=300., WRFB_P0=1.E5, cv=cp-Rd, p1000mbPa=1.E5
+!!$  real(fp), allocatable :: c1f(:), c2f(:) !not needed
+  real(fp), allocatable :: phm(:,:), pfu(:,:), pfd(:,:)
+  
   ! 2d fields:
   ierror = 1 ! 1: sfc pressure
   call gsi_bundlegetpointer (gsi_metguess_bundle(1),'ps',ges_ps,  istatus)
@@ -156,29 +268,82 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
      print *,'HGT[30,24] ',bg_state%HGT(30,24)
   end if
   
-
-  ! ZNU
-  bg_state%ZNU(kts:kte) = aeta1_ll(1:nsig)
+  ! ZNU, and znw, c1h, c2h, c3h, c4h, c3f, c4f
+  if (wrf_mass_regional) then
+     ! first store c3 and c4 from eta1/eta2:
+     ! Note: units of pt_ll, eta2_ll are in hPa, convert to Pa:
+     bg_state%c3h(kts:kte) = aeta1_ll(1:nsig)
+     bg_state%c3f(kts:kte+1) = eta1_ll(1:nsig+1)
+     bg_state%c4h(kts:kte) = r100*aeta2_ll(1:nsig)
+     bg_state%c4f(kts:kte+1) = r100*eta2_ll(1:nsig+1)
+     bg_state%ptop = r100*pt_ll
+  elseif (fv3_regional) then
+     ! first store c3 and c4 from eta1/eta2:
+     ! Note: eta1/eta2 are switched compared to wrf-arw in the GSI
+     ! Note: units of eta1_ll are in kPa, convert to Pa:
+     !       see: gsi_rfv3io_get_grid_specs (gsi_rfv3io_mod.f90), getprs.f90
+     bg_state%c3h(kts:kte) = aeta2_ll(1:nsig)
+     bg_state%c3f(kts:kte+1) = eta2_ll(1:nsig+1)
+     bg_state%c4h(kts:kte) = r1000*aeta1_ll(1:nsig)
+     bg_state%c4f(kts:kte+1) = r1000*eta1_ll(1:nsig+1)
+     bg_state%ptop = 0.
+  end if
+  
+  ! Then compute eta from: eta=c3+c4/(po-ptop) (formulas from module_initialize_real):
+  bg_state%znu(kts:kte) = bg_state%c3h(kts:kte) + bg_state%c4h(kts:kte)/(p1000mbPa-bg_state%ptop)
+  bg_state%znw(kts:kte+1) = bg_state%c3f(kts:kte+1) + bg_state%c4f(kts:kte+1)/(p1000mbPa-bg_state%ptop)
+  ! Now compute c1 and c2 (formulas from module_initialize_real):
+! interface values of c1,c2 not needed
+!!$  allocate(c1f(kms:kme),c2f(kms:kme))
+!!$  c1f(kts) = 1.
+!!$  if (all(abs(bg_state%c4f(kts:kte+1)) .lt. 1.E-4)) then
+!!$     ! terrain-following (old eta) coords:
+!!$     c1f(kte+1) = 1.
+!!$  else
+!!$     ! hybrid coords:
+!!$     c1f(kte+1) = 0.
+!!$  end if
+!!$  do k=kts+1,kte
+!!$     c1f(k) = ( bg_state%c3h(k) - bg_state%c3h(k-1) ) / ( bg_state%znu(k) - bg_state%znu(k-1) )
+!!$  end do
+!!$  DO k=kts, kte+1
+!!$     c2f(k) = ( 1. - c1f(k) ) * ( p1000mbPa - bg_state%ptop )
+!!$  ENDDO
+  DO k=kts, kte
+     bg_state%c1h(k) = ( bg_state%c3f(k+1) - bg_state%c3f(k) ) / ( bg_state%znw(k+1) - bg_state%znw(k) )
+     bg_state%c2h(k) = ( 1. - bg_state%c1h(k) ) * ( p1000mbPa - bg_state%ptop )
+  ENDDO
+  
   if (idebug .ge. 3 .and.  its .le. 30 .and. ite .ge. 30 .and. jts .le. 24 .and. jte .ge. 24) then
      print *,'bg_state%ZNU',bg_state%ZNU
+     print *,'bg_state%ZNW',bg_state%ZNW
+     print *,'bg_state%C1H',bg_state%C1H
+     print *,'bg_state%C2H',bg_state%C2H
+     print *,'bg_state%C3H',bg_state%C3H
+     print *,'bg_state%C4H',bg_state%C4H
+     print *,'bg_state%C3F',bg_state%C3F
+     print *,'bg_state%C4F',bg_state%C4F
   end if
+!!$  deallocate(c1f,c2f) !not needed
 
 !!$    bg_state%MUB(:,:) = ! in WRFDA: grid%mub(ims:ime,jms:jme)
 !!$    bg_state%MU(:,:) = !  in WRFDA: grid%xb%psac(ims:ime,jms:jme) - wrf_state%mub
  
-! Note: units of pt_ll are in hPa, convert to Pa:
-
   ! Compute MUB from base state formulas:
   bg_state%MUB(ims:ime,jms:jme) = WRFB_P0*exp(-WRFB_T0/WRFB_A + &
-       sqrt((WRFB_T0/WRFB_A)**2-two*grav*bg_state%HGT(ims:ime,jms:jme)/(WRFB_A*Rd))) - r100*pt_ll
-  bg_state%MU(ims:ime,jms:jme) = bg_state%PSFC(ims:ime,jms:jme) - r100*pt_ll - bg_state%MUB(ims:ime,jms:jme)
+       sqrt((WRFB_T0/WRFB_A)**2-two*grav*bg_state%HGT(ims:ime,jms:jme)/(WRFB_A*Rd))) - bg_state%ptop
+  ! Compute perturbation MU as the residual:
+  bg_state%MU(ims:ime,jms:jme) = bg_state%PSFC(ims:ime,jms:jme) - bg_state%ptop - bg_state%MUB(ims:ime,jms:jme)
   if (idebug .ge. 3 .and.  its .le. 30 .and. ite .ge. 30 .and. jts .le. 24 .and. jte .ge. 24) then
-     print *,'100*pt_ll, MUB[30,24], MU[30,24] ', r100*pt_ll, bg_state%MUB(30,24), bg_state%MU(30,24)
+     print *,'ptop, MUB[30,24], MU[30,24] ', bg_state%ptop, bg_state%MUB(30,24), bg_state%MU(30,24)
   end if
-
+  ! Note: with the above assignments for c3/c4, the following formulas are consistent with getprs.f90
+  !       for both wrfarw and fv3:
   do k=kts,kte
-     bg_state%PB(ims:ime,jms:jme,k) = bg_state%MUB(ims:ime,jms:jme)*aeta1_ll(k) + r100*pt_ll
-     bg_state%P(ims:ime,jms:jme,k) = bg_state%MU(ims:ime,jms:jme)*aeta1_ll(k)
+!!$     bg_state%PB(ims:ime,jms:jme,k) = bg_state%MUB(ims:ime,jms:jme)*aeta1_ll(k) + bg_state%ptop
+     bg_state%PB(ims:ime,jms:jme,k) = bg_state%ptop + bg_state%MUB(ims:ime,jms:jme)*bg_state%c3h(k) + bg_state%c4h(k)
+!!$     bg_state%P(ims:ime,jms:jme,k) = bg_state%MU(ims:ime,jms:jme)*aeta1_ll(k)
+     bg_state%P(ims:ime,jms:jme,k) = bg_state%ptop + bg_state%MU(ims:ime,jms:jme)*bg_state%c3h(k) + bg_state%c4h(k)
   end do
   bg_state%PB(ims:ime,jms:jme,kme) = bg_state%PB(ims:ime,jms:jme,kte) 
   bg_state%P(ims:ime,jms:jme,kme) = bg_state%P(ims:ime,jms:jme,kte) 
@@ -207,14 +372,13 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
      print *,'V [30,24] ',bg_state%V(30,24,:)
   end if
   
-  ! Now try to handle the hydrometeors
-  bg_state%moist = 0
+! MOIST array:
+  bg_state%MOIST(ims:ime,jms:jme,kms:kme,:) = zero
   ierror=ierror+1 ! 4: qv
   call gsi_bundlegetpointer (gsi_metguess_bundle(1),'q', ges_q,   istatus)
   if (istatus .ne. 0) return
 
 ! Convert specific humidity to mixing ratio
-  bg_state%MOIST(ims:ime,jms:jme,kms:kme,:) = zero
   bg_state%MOIST(ims:ime,jms:jme,kts:kte,p_qv) = ges_q(1:lat2,1:lon2,1:nsig)/(1-ges_q(1:lat2,1:lon2,1:nsig))
 
   if (idebug .ge. 3 .and.  its .le. 30 .and. ite .ge. 30 .and. jts .le. 24 .and. jte .ge. 24) then
@@ -226,8 +390,6 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
   call gsi_bundlegetpointer (gsi_metguess_bundle(1),'tv', ges_tv,   istatus)
   if (istatus .ne. 0) return
 
-  ierror = 0 !Finished with all metguess_bundle calls, success
- 
   bg_state%T(ims:ime,jms:jme,kts:kte) = ges_tv(1:lat2,1:lon2,1:nsig)
   if (idebug .ge. 3 .and.  its .le. 30 .and. ite .ge. 30 .and. jts .le. 24 .and. jte .ge. 24) then
      print *,'tv: T [30,24] ',bg_state%T(30,24,kts:kte)
@@ -255,20 +417,27 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
   end if
 
 ! Compute PHB from formulas:
+  allocate(phm(ims:ime,jms:jme),pfu(ims:ime,jms:jme),pfd(ims:ime,jms:jme))
   bg_state%PHB(ims:ime,jms:jme,1) = bg_state%HGT(ims:ime,jms:jme) * grav
   do k=kts+1,kte+1
+!!$     bg_state%PHB(ims:ime,jms:jme,k) = bg_state%PHB(ims:ime,jms:jme,k-1) + &
+!!$          (eta1_ll(k-1)-eta1_ll(k))*bg_state%MUB(ims:ime,jms:jme) * &
+     pfu(:,:) = bg_state%PTOP+bg_state%MUB(:,:)*bg_state%C3F(k)  +bg_state%C4F(k)
+     pfd(:,:) = bg_state%PTOP+bg_state%MUB(:,:)*bg_state%C3F(k-1)+bg_state%C4F(k-1)
+     phm(:,:) = bg_state%PTOP+bg_state%MUB(:,:)*bg_state%C3H(k-1)+bg_state%C4H(k-1)
      bg_state%PHB(ims:ime,jms:jme,k) = bg_state%PHB(ims:ime,jms:jme,k-1) + &
-          (eta1_ll(k-1)-eta1_ll(k))*bg_state%MUB(ims:ime,jms:jme) * &
+          phm(:,:)*log(pfd(:,:)/pfu(:,:)) * &
           (Rd * ( &
            (WRFB_T0+WRFB_A*log(bg_state%PB(ims:ime,jms:jme,k)/WRFB_P0)) * &
            (WRFB_P0/bg_state%PB(ims:ime,jms:jme,k))**kappa)/WRFB_P0) * &
           (bg_state%PB(ims:ime,jms:jme,k)/WRFB_P0)**(-cv/cp)
   end do
+  deallocate(phm,pfu,pfd)
 
 ! geopotential: use subroutine from displace_wrf module to compute total PH:
   call calc_ph_hyd_wrf(bg_state%MOIST(:,:,:,p_qv), bg_state%P, bg_state%PB, &
-       bg_state%T, bg_state%HGT, bg_state%MU, bg_state%MUB, bg_state%ZNU, &
-       bg_state%PH)
+       bg_state%T, bg_state%HGT, bg_state%MU, bg_state%MUB, &
+       bg_state%C3H, bg_state%C4H, bg_state%C3F, bg_state%C4F, bg_state%PTOP, bg_state%PH)
   bg_state%PH(ims:ime,jms:jme,kms:kme) = bg_state%PH(ims:ime,jms:jme,kms:kme) - &
        bg_state%PHB(ims:ime,jms:jme,kms:kme)
   if (idebug .ge. 3) then
@@ -324,6 +493,24 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
    end do
   end if
 
+  if (nmoist .gt. 1) then
+     do imoist=2,nmoist
+        ierror=ierror+1 ! 5-4+nmoist-1: elements of moist array
+        if (moistguess(imoist) .eq. 1) then
+           call gsi_bundlegetpointer (gsi_metguess_bundle(1),trim(moistnames(imoist)), ges_rank3, istatus)
+        elseif (moistguess(imoist) .eq. 2) then
+           call gsi_bundlegetpointer (gsi_chemguess_bundle(1),trim(moistnames(imoist)), ges_rank3, istatus)
+        else
+           write (*,*) 'ges_to_fca_wrf: invalid value of moistguess=',moistguess(imoist),' for imoist=',imoist
+           istatus=1
+        end if
+        if (istatus .ne. 0) return
+        bg_state%MOIST(ims:ime,jms:jme,kts:kte,imoist) = ges_rank3(1:lat2,1:lon2,1:nsig)
+     end do
+  end if
+
+  ierror = 0 !Finished with all metguess/chemguess_bundle calls, success
+
   !DM_PARALLEL debugging:
 
   if (idebug .ge. 2) then
@@ -331,8 +518,10 @@ subroutine ges_to_fca_wrf(bg_state, nmoist, ierror)
      call print_halos('p',bg_state%p(ims,jms,kms),kte)
      call print_halos('u',bg_state%u(ims,jms,kms),kte)
      call print_halos('v',bg_state%v(ims,jms,kms),kte)
-     call print_halos('qv',bg_state%moist(ims,jms,kms,p_qv),kte)
      call print_halos('t',bg_state%t(ims,jms,kms),kte)
+     do imoist=1,nmoist
+        call print_halos(moistnames(imoist),bg_state%moist(ims,jms,kms,imoist),kte)
+     end do
   end if
   
 end subroutine ges_to_fca_wrf
@@ -378,7 +567,7 @@ subroutine sval_to_disp_grid_adj(sval,disp,uv_zlevel,ierror)
   type(fca_gridded_disp), intent(inout):: disp
   integer, intent(in) :: uv_zlevel
   integer, intent(out) :: ierror
-  integer(i_kind) :: i,j,k, istatus
+  integer(i_kind) :: i,j,k, imoist, istatus
   character (len=80) :: fname_fcauv ! for debugging output of disp_ad
 
   real(r_kind),pointer,dimension(:,:)   :: sv_ps
@@ -388,6 +577,7 @@ subroutine sval_to_disp_grid_adj(sval,disp,uv_zlevel,ierror)
   real(r_kind),pointer,dimension(:,:,:) :: sv_q
   real(r_kind),pointer,dimension(:,:,:) :: sv_tsen
   real(r_kind),pointer,dimension(:,:,:) :: sv_tv
+  real(r_kind),pointer,dimension(:,:,:) :: sv_rank3
   
   real(r_kind),dimension(nlat*nlon*s2g_raf%nlevs_alloc)      :: hwork
 
@@ -452,6 +642,18 @@ subroutine sval_to_disp_grid_adj(sval,disp,uv_zlevel,ierror)
   if (istatus .ne. 0) return
   sv_tv(1:lat2,1:lon2,1:nsig) = zero
 
+  ! MOIST array
+  if (nmoist .gt. 1) then
+     do imoist=2,nmoist
+        call gsi_bundlegetpointer (sval(1),trim(moistnames(imoist)),sv_rank3 ,  istatus)
+        if (istatus .ne. 0) then
+           if (mype .eq. 0) write (*,*) 'sval_to_disp_adj: ',trim(moistnames(imoist)),' missing from sval, skipped'
+        else
+           sv_rank3(1:lat2,1:lon2,1:nsig) = zero
+        end if
+     end do
+  end if
+
 ! Halo exchange of GSI gradients after transfer from FCA
 ! Convert from subdomain to full horizontal field distributed among processors
   call general_sub2grid(s2g_raf,sval(1)%values,hwork)
@@ -474,7 +676,7 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
   integer, intent(out) :: ierror
   logical, intent(in) :: flag_linear
 
-  integer :: i,j,k, istatus
+  integer :: i,j,k,imoist,istatus
   real(r_kind),pointer,dimension(:,:)   :: sv_ps
   real(r_kind),pointer,dimension(:,:,:) :: sv_u
   real(r_kind),pointer,dimension(:,:,:) :: sv_v
@@ -482,10 +684,12 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
   real(r_kind),pointer,dimension(:,:,:) :: sv_q
   real(r_kind),pointer,dimension(:,:,:) :: sv_tsen
   real(r_kind),pointer,dimension(:,:,:) :: sv_tv
+  real(r_kind),pointer,dimension(:,:,:) :: sv_rank3
 
   real(fp) :: work3d_1(ims:ime,jms:jme,kms:kme),work3d_2(ims:ime,jms:jme,kms:kme), &
        work3d_3(ims:ime,jms:jme,kms:kme)
 
+  character (len=max_varname_length) :: haloname
   real(r_kind) :: hwork(nlat*nlon*s2g_raf%nlevs_alloc)
   real(r_kind),allocatable :: hwork_press(:,:,:,:),work_field(:,:,:,:)
 
@@ -530,15 +734,21 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
     call print_halos('full_p',full_state%p(ims,jms,kms),kte)
     call print_halos('full_u',full_state%u(ims,jms,kms),kte)
     call print_halos('full_v',full_state%v(ims,jms,kms),kte)
-    call print_halos('full_qv',full_state%moist(ims,jms,kms,p_qv),kte)
     call print_halos('full_t',full_state%t(ims,jms,kms),kte)
 
     call print_halos('inc_psfc',inc_state%psfc(ims,jms),1)
     call print_halos('inc_p',inc_state%p(ims,jms,kms),kte)
     call print_halos('inc_u',inc_state%u(ims,jms,kms),kte)
     call print_halos('inc_v',inc_state%v(ims,jms,kms),kte)
-    call print_halos('inc_qv',inc_state%moist(ims,jms,kms,p_qv),kte)
     call print_halos('inc_t',inc_state%t(ims,jms,kms),kte)
+
+    do imoist=1,nmoist
+       haloname='full_' // trim(moistnames(imoist))
+       call print_halos(haloname,full_state%moist(ims,jms,kms,imoist),kte)
+       haloname='inc_' // trim(moistnames(imoist))
+       call print_halos(haloname,inc_state%moist(ims,jms,kms,imoist),kte)
+    end do
+    
  end if
 
   ! 2d fields:
@@ -586,7 +796,7 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
   ! Also need to compute and store sv_tv:
   call gsi_bundlegetpointer (sval(1),'tv'   ,sv_tv ,  istatus)
   if (istatus .ne. 0) return
-  work3d_3(ims:ime,jms:jme,kms:kme)=t300+full_state%T(ims:ime,jms:jme,kts:kte)
+  work3d_3(ims:ime,jms:jme,kts:kte)=t300+full_state%T(ims:ime,jms:jme,kts:kte)
   ! restore original pot temperature by subtracting pot temp increment:
   if (.not. flag_linear) work3d_3(ims:ime,jms:jme,kts:kte) = work3d_3(ims:ime,jms:jme,kts:kte) - &
        inc_state%T(ims:ime,jms:jme,kts:kte)
@@ -598,8 +808,6 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
        ((work3d_2(ims:ime,jms:jme,kts:kte)/base_pres)**kappa) * work3d_3(ims:ime,jms:jme,kts:kte) * &
        inc_state%MOIST(ims:ime,jms:jme,kts:kte,p_qv)*((one/r622)-one)/((1+work3d_1(ims:ime,jms:jme,kts:kte))**2)
 
-  ierror = 0
-
   if (idebug .ge. 3) then
      write (*,'(a,i4,6(i4,i4,e15.6))') 'before sv_u(k=15) mype=',mype,1,1,sv_u(1,1,15),2,2,sv_u(2,2,15),haloi+lat1,haloj+lon1,sv_u(haloi+lat1,haloj+lon1,15),lat2,lon2,sv_u(lat2,lon2,15)
      write (*,'(a,i4,6(i4,i4,e15.6))') 'before sv_v(k=15) mype=',mype,1,1,sv_v(1,1,15),2,2,sv_v(2,2,15),haloi+lat1,haloj+lon1,sv_v(haloi+lat1,haloj+lon1,15),lat2,lon2,sv_v(lat2,lon2,15)
@@ -607,7 +815,20 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
      write (*,'(a,i4,6(i4,i4,e15.6))') 'before sv_tsen(k=15) mype=',mype,1,1,sv_tsen(1,1,15),2,2,sv_tsen(2,2,15),haloi+lat1,haloj+lon1,sv_tsen(haloi+lat1,haloj+lon1,15),lat2,lon2,sv_tsen(lat2,lon2,15)
   end if
   
-  !TBD: hydrometeors (see control2state for how to do this)
+  ! MOIST array
+  if (nmoist .gt. 1) then
+     do imoist=2,nmoist
+        call gsi_bundlegetpointer (sval(1),trim(moistnames(imoist)),sv_rank3 ,  istatus)
+        if (istatus .ne. 0) then
+           if (mype .eq. 0) write (*,*) 'fca_state_to_sval: ',trim(moistnames(imoist)),' missing from sval, skipped'
+        else
+           sv_rank3(1:lat2,1:lon2,1:nsig) = inc_state%MOIST(ims:ime,jms:jme,kts:kte,imoist)
+        end if
+     end do
+  end if
+  
+  ierror = 0
+
   ! Halo exchange of GSI increments after transfer from FCA:
   ! Convert from subdomain to full horizontal field distributed among processors
   call general_sub2grid(s2g_raf,sval(1)%values,hwork)
@@ -643,12 +864,18 @@ subroutine fca_state_to_sval(full_state,inc_state,flag_linear,sval,ierror)
     call print_halos('inc2_u',inc_state%u(ims,jms,kms),kte)
     inc_state%V(ims:ime,jms:jme,kts:kte) = sv_v(1:lat2,1:lon2,1:nsig)
     call print_halos('inc2_v',inc_state%v(ims,jms,kms),kte)
-    inc_state%MOIST(ims:ime,jms:jme,kts:kte,p_qv) = sv_q(1:lat2,1:lon2,1:nsig)
-    call print_halos('inc2_qv',inc_state%moist(ims,jms,kms,p_qv),kte)
     inc_state%T(ims:ime,jms:jme,kts:kte) = sv_tsen(1:lat2,1:lon2,1:nsig)
     call print_halos('inc2_t',inc_state%t(ims,jms,kms),kte)
     inc_state%T(ims:ime,jms:jme,kts:kte) = sv_tv(1:lat2,1:lon2,1:nsig)
     call print_halos('inc2_tv',inc_state%t(ims,jms,kms),kte)
+    do imoist=1,nmoist
+       call gsi_bundlegetpointer (sval(1),trim(moistnames(imoist)),sv_rank3 ,  istatus)
+       if (istatus .eq. 0) then
+          inc_state%MOIST(ims:ime,jms:jme,kts:kte,imoist) = sv_rank3(1:lat2,1:lon2,1:nsig)
+          haloname='inc2_' // trim(moistnames(imoist))
+          call print_halos(haloname,inc_state%moist(ims,jms,kms,imoist),kte)
+       end if
+    end do
  end if
 
 end subroutine fca_state_to_sval
@@ -663,7 +890,7 @@ subroutine fca_state_to_sval_adj(full_state,inc_state,flag_linear,sval,ierror)
   integer, intent(out) :: ierror
   logical, intent(in) :: flag_linear
 
-  integer :: i,j,k, istatus
+  integer :: i,j,k, imoist, istatus
   real(r_kind),pointer,dimension(:,:)   :: sv_ps
   real(r_kind),pointer,dimension(:,:,:) :: sv_u
   real(r_kind),pointer,dimension(:,:,:) :: sv_v
@@ -671,15 +898,27 @@ subroutine fca_state_to_sval_adj(full_state,inc_state,flag_linear,sval,ierror)
   real(r_kind),pointer,dimension(:,:,:) :: sv_q
   real(r_kind),pointer,dimension(:,:,:) :: sv_tv
   real(r_kind),pointer,dimension(:,:,:) :: sv_tsen
+  real(r_kind),pointer,dimension(:,:,:) :: sv_rank3
 
+  character (len=max_varname_length) :: haloname
   real(fp) :: work3d_1(ims:ime,jms:jme,kms:kme),work3d_2(ims:ime,jms:jme,kms:kme),&
        work3d_3(ims:ime,jms:jme,kms:kme)
 
-  !TBD: hydrometeors (see control2state for how to do this)
+  ! MOIST array:
+  if (nmoist .gt. 1) then
+     do imoist=2,nmoist
+        call gsi_bundlegetpointer (sval(1),trim(moistnames(imoist)),sv_rank3 ,  istatus)
+        if (istatus .ne. 0) then
+           if (mype .eq. 0) write (*,*) 'fca_state_to_sval_adj: ',trim(moistnames(imoist)),' missing from sval, skipped'
+        else
+           inc_state%MOIST(ims:ime,jms:jme,kts:kte,imoist) = sv_rank3(1:lat2,1:lon2,1:nsig)
+        end if
+     end do
+  end if
 
   work3d_1(ims:ime,jms:jme,kts:kte)=full_state%MOIST(ims:ime,jms:jme,kts:kte,p_qv)
   work3d_2(ims:ime,jms:jme,kts:kte)=full_state%PB(ims:ime,jms:jme,kts:kte)+full_state%P(ims:ime,jms:jme,kts:kte)
-  work3d_3(ims:ime,jms:jme,kms:kme)=t300+full_state%T(ims:ime,jms:jme,kts:kte)
+  work3d_3(ims:ime,jms:jme,kts:kte)=t300+full_state%T(ims:ime,jms:jme,kts:kte)
 
   ierror=5 ! 5: tsen
   call gsi_bundlegetpointer (sval(1),'tsen'   ,sv_tsen ,  istatus)
@@ -794,8 +1033,11 @@ subroutine fca_state_to_sval_adj(full_state,inc_state,flag_linear,sval,ierror)
      call print_halos('adj_p',inc_state%p(ims,jms,kms),kte)
      call print_halos('adj_u',inc_state%u(ims,jms,kms),kte)
      call print_halos('adj_v',inc_state%v(ims,jms,kms),kte)
-     call print_halos('adj_qv',inc_state%moist(ims,jms,kms,p_qv),kte)
      call print_halos('adj_t',inc_state%t(ims,jms,kms),kte)
+     do imoist=1,nmoist
+        haloname='adj_' // trim(moistnames(imoist))
+        call print_halos(haloname,inc_state%moist(ims,jms,kms,imoist),kte)
+     end do
   end if
 
   ierror=0
@@ -832,7 +1074,8 @@ subroutine print_halos(varname,print_array,nlev)
               write (unit_print,'(6e20.10)') (print_array(i,j,k),j=jms,jme)
            end do
         end if
-        if (ite .lt. ide) then
+        ! Note: need to check here against ide-1/jde-1, since ide/jde are padded by one
+        if (ite .lt. ide-1) then
            do i=ite,ime
               write (unit_print,'(a,i4,a,i4,2i4)') 'k=',k,' i=',i,jms,jme
               write (unit_print,'(6e20.10)') (print_array(i,j,k),j=jms,jme)
@@ -844,7 +1087,7 @@ subroutine print_halos(varname,print_array,nlev)
               write (unit_print,'(6e20.10)') (print_array(i,j,k),i=ims,ime)
            end do
         end if
-        if (jte .lt. jde) then
+        if (jte .lt. jde-1) then
            do j=jte,jme
               write (unit_print,'(a,i4,a,i4,2i4)') 'k=',k,' j=',j,ims,ime
               write (unit_print,'(6e20.10)') (print_array(i,j,k),i=ims,ime)

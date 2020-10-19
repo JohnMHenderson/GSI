@@ -57,6 +57,13 @@ subroutine fca_zero_wrf_grid(wrf_grid)
     wrf_grid%PSFC=zero
     wrf_grid%PH_NL=zero
     wrf_grid%ZNU=zero
+    wrf_grid%ZNW=zero
+    wrf_grid%C1H=zero
+    wrf_grid%C2H=zero
+    wrf_grid%C3H=zero
+    wrf_grid%C4H=zero
+    wrf_grid%C3F=zero
+    wrf_grid%C4F=zero
     wrf_grid%MOIST=zero
 end subroutine fca_zero_wrf_grid
 
@@ -74,12 +81,23 @@ subroutine fca_copy_wrf_grid(wrf_grid_from,wrf_grid_to,ierror)
 #ifdef TRACE_USE
   if (trace_use) call da_trace_entry("fca_copy_wrf_grid")
 #endif
-  ierror = 1 ! "eta values on half (mass) levels" 
+  wrf_grid_to%ptop = wrf_grid_from%ptop
+  ierror = 1 ! "eta values and c1,c2,c3,c4"
   if(.not.allocated(wrf_grid_to%ZNU)) then
-     allocate(wrf_grid_to%ZNU(kms:kme),STAT=status)
+     allocate(wrf_grid_to%ZNU(kms:kme),wrf_grid_to%ZNW(kms:kme), &
+          wrf_grid_to%C1H(kms:kme),wrf_grid_to%C2H(kms:kme), &
+          wrf_grid_to%C3H(kms:kme),wrf_grid_to%C4H(kms:kme), &
+          wrf_grid_to%C3F(kms:kme),wrf_grid_to%C4F(kms:kme),STAT=status)
      if (status /= 0) return
   endif
   wrf_grid_to%ZNU(:) = wrf_grid_from%ZNU(:)
+  wrf_grid_to%ZNW(:) = wrf_grid_from%ZNW(:)
+  wrf_grid_to%C1H(:) = wrf_grid_from%C1H(:)
+  wrf_grid_to%C2H(:) = wrf_grid_from%C2H(:)
+  wrf_grid_to%C3H(:) = wrf_grid_from%C3H(:)
+  wrf_grid_to%C4H(:) = wrf_grid_from%C4H(:)
+  wrf_grid_to%C3F(:) = wrf_grid_from%C3F(:)
+  wrf_grid_to%C4F(:) = wrf_grid_from%C4F(:)
 
   ierror = ierror + 1 ! 2: surface topography /terrain height
   if(.not.allocated(wrf_grid_to%HGT)) then
@@ -194,8 +212,11 @@ subroutine fca_allocate_wrf_grid(wrf_grid_to,nmoist,ierror)
 #ifdef TRACE_USE
   if (trace_use) call da_trace_entry("fca_allocate_wrf_grid")
 #endif
-  ierror = 1 ! "eta values on half (mass) levels" 
-  allocate(wrf_grid_to%ZNU(kms:kme),STAT=status)
+  ierror = 1 ! "eta values and c1,c2,c3,c4" 
+  allocate(wrf_grid_to%ZNU(kms:kme),wrf_grid_to%ZNW(kms:kme), &
+       wrf_grid_to%C1H(kms:kme),wrf_grid_to%C2H(kms:kme), &
+       wrf_grid_to%C3H(kms:kme),wrf_grid_to%C4H(kms:kme), &
+       wrf_grid_to%C3F(kms:kme),wrf_grid_to%C4F(kms:kme),STAT=status)
   if (status /= 0) return
 
   ierror = ierror + 1 ! 2: surface topography /terrain height
@@ -267,8 +288,9 @@ subroutine fca_deallocate_wrf_grid(wrf_grid,ierror)
 #endif
     ierror = 1 ! "eta values on half (mass) levels" 
     if(allocated(wrf_grid%ZNU)) then
-        deallocate(wrf_grid%ZNU,stat=status)
-    	if (status /= 0) return
+       deallocate(wrf_grid%ZNU,wrf_grid%ZNW, wrf_grid%C1H,wrf_grid%C2H, &
+            wrf_grid%C3H,wrf_grid%C4H, wrf_grid%C3F,wrf_grid%C4F,STAT=status)
+       if (status /= 0) return
     end if
 
     ierror = ierror + 1 ! 2: surface topography /terrain height
