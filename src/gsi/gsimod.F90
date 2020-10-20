@@ -694,6 +694,7 @@
        cao_check,lcalc_gfdl_cfrac,tau_fcst,efsoi_order,lupdqc,lqcoef,cnvw_option, &
        fca_switch, uv_zlevel_par
 
+
 ! GRIDOPTS (grid setup variables,including regional specific variables):
 !     jcap     - spectral resolution
 !     nsig     - number of sigma levels

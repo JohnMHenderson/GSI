@@ -23,6 +23,7 @@ subroutine read_fl_hdob(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,si
 !                         linear qc error table and b table
 
 !   2015-10-01  guo      - calc ob location once in deg
+!   2020-05-04  wu       - no rotate_wind for fv3_regional
 !
 !   input argument list:
 !     infile    - unit from which to read BUFR data
@@ -50,7 +51,7 @@ subroutine read_fl_hdob(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,si
          r60inv,r10,r100,r2000,hvap,eps,omeps,rv,grav
      use gridmod, only: diagnostic_reg,regional,nlon,nlat,nsig,&
          tll2xy,txy2ll,rotate_wind_ll2xy,rotate_wind_xy2ll,&
-         rlats,rlons,twodvar_regional
+         rlats,rlons,twodvar_regional,fv3_regional
      use convinfo, only: nconvtype, &
          icuse,ictype,icsubtype,ioctype, &
          ithin_conv,rmesh_conv,pmesh_conv
@@ -241,7 +242,7 @@ subroutine read_fl_hdob(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,si
         iecol  =  2 
         errmin = half      ! set lower bound of ob error for T or Tv
      else if (luvob) then
-        nreal  = 25
+        nreal  = 26
         iecol  =  4  
         errmin = one       ! set lower bound of ob error for u,v winds
      else if (lspdob) then
@@ -999,7 +1000,7 @@ subroutine read_fl_hdob(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,si
               if (pob_mb < r50)  woe = woe*r1_2
               if (inflate_error) woe = woe*r1_2
               if (qcm > lim_qm ) woe = woe*1.0e6_r_kind
-              if(regional)then
+              if(regional .and. .not. fv3_regional)then
                  u0 = uob
                  v0 = vob
                  call rotate_wind_ll2xy(u0,v0,uob,vob,dlon_earth,dlon,dlat)
@@ -1035,6 +1036,7 @@ subroutine read_fl_hdob(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,si
               cdata_all(23,iout)=r_sprvstg(1,1)         ! subprovider name
               cdata_all(24,iout)=qcm                    ! cat
               cdata_all(25,iout)=var_jb                 ! non linear qc 
+              cdata_all(26,iout)=one
               if(perturb_obs)then
                  cdata_all(26,iout)=ran01dom()*perturb_fact ! u perturbation
                  cdata_all(27,iout)=ran01dom()*perturb_fact ! v perturbation
