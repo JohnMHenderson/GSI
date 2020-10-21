@@ -74,6 +74,10 @@ cmake_minimum_required(VERSION 2.8)
     )
   endif(BUILD_GLOBAL)
 
+# set up the preprocessor flag for FCA codes
+# (should use "add_compile_definitions(-DFCA_REF_MOD -DDM_PARALLEL)" for cmake version >= 3.12)
+  add_definitions(-DFCA_REF_MOD -DDM_PARALLEL)
+
 # set up the compiler flags
   set_source_files_properties( ${GSIMAIN_SRC}	PROPERTIES COMPILE_FLAGS ${GSI_Fortran_FLAGS} )
   set_source_files_properties( ${GSIFORT_SRC}	PROPERTIES COMPILE_FLAGS ${GSI_Fortran_FLAGS} )

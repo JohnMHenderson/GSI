@@ -38,6 +38,10 @@ use gsi_bundlemod, only: assignment(=)
 use bias_predictors, only: predictors,allocate_preds,deallocate_preds, &
     assignment(=)
 
+use fca_gsi_inter_m, only: fca_switch, idebug
+use fca_xtofca_mod, only: xtofca
+use fca_xtofca_adj_mod, only: xtofca_adj
+
 implicit none
 private
 public adtest,ltestadj
@@ -118,10 +122,24 @@ if(lsqrtb)then
 else
    call control2state(xtest1,stest1,sbias1)
 endif
+!*********************fca_Section********************
+if (fca_switch) then
+   call xtofca(stest1,.TRUE.)
+   if (idebug .ge. 3) then
+      write (*,*) 'adtest: stest1 after xtofca'
+      call prt_state_norms(stest1(1),'stest1')
+   end if
+end if
+!****************************************************
 do ii=1,nsubwin
    stest2(ii)=stest1(ii)
 enddo
 sbias2=sbias1
+!*********************fca_Section********************
+if (fca_switch) then
+   call xtofca_adj(stest2,.TRUE.)
+end if
+!*********************fca_Section********************
 if(lsqrtb)then
    call control2model_ad(stest2,sbias2,xtest2)
 else

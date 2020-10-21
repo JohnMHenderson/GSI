@@ -1,7 +1,7 @@
 [submodule "fix"]
 	path = fix
-	url = gerrit:GSI-fix
+	url = https://John.Henderson@vlab.ncep.noaa.gov/code-review/a/GSI-fix
 
 [submodule "libsrc"]
 	path = libsrc
-	url = gerrit:GSI-libsrc
+	url = https://John.Henderson@vlab.ncep.noaa.gov/code-review/a/GSI-libsrc

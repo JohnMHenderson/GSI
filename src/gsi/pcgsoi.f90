@@ -161,6 +161,9 @@ subroutine pcgsoi()
   use berror, only: vprecond
 
   use stpjomod, only: stpjo_setup
+  use fca_gsi_inter_m, only: fca_switch, idebug
+  use fca_xtofca_mod, only: xtofca
+  use fca_xtofca_adj_mod, only: xtofca_adj
   implicit none
 
 ! Declare passed variables
@@ -274,6 +277,17 @@ subroutine pcgsoi()
 !    Convert from control space directly to physical
 !    space for comparison with obs.
      call control2state(xhat,mval,sbias)
+
+!*********************fca_Section********************
+     if (fca_switch) then
+        call xtofca(mval,.TRUE.)
+        if (idebug .ge. 3) then
+           write (*,*) 'mval after xtofca (linear=TRUE):'
+           call prt_state_norms(mval(1),'mval')
+        end if
+     end if
+!****************************************************
+
      if (l4dvar) then
         if (l_hyb_ens) then
            call ensctl2state(xhat,mval(1),eval)
@@ -340,6 +354,17 @@ subroutine pcgsoi()
         end if
 
      end if
+
+!*********************fca_adj_Section********************
+     if (fca_switch) then
+        call xtofca_adj(mval,.TRUE.)
+        if (idebug .ge. 3) then
+           write (*,*) 'mval after xtofca_adj:'
+           call prt_state_norms(mval(1),'mval')
+        end if
+     end if
+!****************************************************
+
      call control2state_ad(mval,rbias,gradx)
 !    End adjoint of convert control var to physical space
 
@@ -655,6 +680,15 @@ subroutine pcgsoi()
 
   llprt=(mype==0)
   call control2state(xhat,mval,sbias)
+!*********************fca_Section********************
+  if (fca_switch) then
+     call xtofca(mval,.FALSE.)
+     if (idebug .ge. 3) then
+        write (*,*) 'mval after xtofca (linear=FALSE):'
+        call prt_state_norms(mval(1),'mval')
+     end if
+  end if
+!****************************************************
   if (l4dvar) then
     if (l_hyb_ens) then
        call ensctl2state(xhat,mval(1),eval)
@@ -705,6 +739,16 @@ subroutine pcgsoi()
           end if
        end if
      end if
+!*********************fca_adj_Section********************
+     if (fca_switch) then
+        call xtofca_adj(mval,.TRUE.)
+        if (idebug .ge. 3) then
+           write (*,*) 'mval after xtofca_adj:'
+           call prt_state_norms(mval(1),'mval')
+        end if
+     end if
+!****************************************************
+
      call control2state_ad(mval,rbias,gradx)
   
 !    Add contribution from background term
