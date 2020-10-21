@@ -1188,11 +1188,7 @@ subroutine read_ozone(nread,ndata,nodata,jsatid,infile,gstime,lunout, &
          omrstd(k) = lpsdvals(3,k) !omr std
          j = j + 1
          if(omr(k) < 0._r_double .or. omr(k) > 100._r_double) then
-<<<<<<< HEAD
-            usage1(k) = 1000._r_kind
-=======
             usage1(k) = badoz
->>>>>>> master
             j = j - 1
          endif
        enddo
